@@ -35,9 +35,7 @@ def is_financial(text):
     return financial_terms >= 2 and not non_financial
 
 # ----------------------------------------------------
-# --- GLOBAL MODEL INITIALIZATION (READY STATE PART 1) ---
-# This happens immediately when the script starts, preparing the GPU.
-# ----------------------------------------------------
+# --- GLOBAL MODEL INITIALIZATION ---
 try:
     print("MSRT: Loading AI models (using GPU: device=0)...")
     finbert = pipeline("text-classification", model="yiyanghkust/finbert-tone", device=0)
@@ -51,7 +49,7 @@ except Exception as e:
     print("MSRT: AI Models loaded on CPU. Ready for user input.")
 
 
-# [5] News Fetcher with Better Filtering (The action that waits for input)
+# [5] News Fetcher with Better Filtering
 def fetch_news(newsapi_key, alphavantage_key):
     """Get news from multiple sources"""
     sources = [
@@ -125,7 +123,6 @@ def analyze_selected_market(target_market, newsapi_key, alphavantage_key):
     """Triggers news fetch and filtering based on user's choice"""
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
-    # Data fetch occurs here (the slow API call)
     print(f"\n[{current_time}] MSRT: 📞 Fetching all financial news via API...")
     news_items = fetch_news(newsapi_key, alphavantage_key)
 
@@ -135,7 +132,6 @@ def analyze_selected_market(target_market, newsapi_key, alphavantage_key):
 
     print(f"MSRT: Filtering data for {target_market}...")
     
-    # Filtering and processing logic (fast due to GPU models already loaded)
     results = []
     keywords = MARKET_KEYWORDS.get(target_market)
     
@@ -158,7 +154,6 @@ def analyze_selected_market(target_market, newsapi_key, alphavantage_key):
 
         results_df = pd.DataFrame(results)
 
-        # Save Results to CSV
         if not results_df.empty:
             log_file = f"msrt_{target_market.lower()}_signals.csv" 
             write_header = not os.path.exists(log_file)
@@ -172,10 +167,7 @@ def analyze_selected_market(target_market, newsapi_key, alphavantage_key):
         print(f"MSRT: ERROR: Invalid market '{target_market}' passed to analyzer.")
 
 
-# ----------------------------------------------------
-# --- INTERACTIVE EXECUTION LOGIC (READY STATE PART 2) ---
-# This is the prompt that runs after models are loaded.
-# ----------------------------------------------------
+# --- INTERACTIVE LOOPING EXECUTION LOGIC ---
 if __name__ == "__main__":
     load_dotenv()
     NEWSAPI_KEY = os.getenv('NEWSAPI_KEY')
@@ -184,28 +176,33 @@ if __name__ == "__main__":
     if not NEWSAPI_KEY or not ALPHAVANTAGE_KEY:
         print("MSRT: FATAL ERROR: API keys not found in .env file. System cannot run.")
     else:
-        # --- USER INPUT SECTION ---
-        print("\n" + "="*50)
-        print("MSRT Interactive Market Sentiment Analysis")
-        print("Available Markets: " + ", ".join(AVAILABLE_MARKETS))
-        print("="*50)
-        
+        # --- PRIMARY LOOP (Runs indefinitely until user exits) ---
         while True:
+            # Display menu and prompt user for input on each loop iteration
+            print("\n" + "="*50)
+            print("MSRT Interactive Market Sentiment Analysis")
+            print("Available Markets: " + ", ".join(AVAILABLE_MARKETS))
+            print("Type 'exit' to quit the program.") # New instruction
+            print("="*50)
+            
             user_input = input("Enter market name to analyze (e.g., Stocks, Crypto): ").strip()
+
+            # --- EXIT CONDITION ---
+            if user_input.lower() == 'exit':
+                print("\nMSRT: Exiting interactive session. Goodbye.")
+                break 
+
+            # --- VALIDATE INPUT AND RUN ANALYSIS ---
             target_market = user_input.title()
             
             if target_market in AVAILABLE_MARKETS:
                 print(f"MSRT: Valid market selected. Starting analysis for {target_market}...")
                 
-                # Clear GPU cache before running the resource-intensive analysis
                 if torch.cuda.is_available():
                      torch.cuda.empty_cache() 
                 
-                # EXECUTION POINT: Data fetch and analysis begins here
+                # Execute the analysis (NO BREAK HERE)
                 analyze_selected_market(target_market, NEWSAPI_KEY, ALPHAVANTAGE_KEY)
-                break 
-            
+                
             else:
                 print(f"⚠️ MSRT: Invalid market name: '{user_input}'. Please try again.")
-
-        print("\nMSRT: Interactive session complete.")
