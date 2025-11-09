@@ -1,0 +1,17 @@
+# Large Datasets
+combined_training_data.csv
+overall_dataset.csv
+crypto_dataset.csv
+
+# Secret API Keys (VERY IMPORTANT!)
+.env
+
+# Trained Model (also too big)
+finbert_finetuned/
+
+# Python cache & logs
+__pycache__/
+logs/
+
+# VSCode settings
+.vscode/
