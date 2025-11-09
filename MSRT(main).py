@@ -22,17 +22,14 @@ AVAILABLE_MARKETS = list(MARKET_KEYWORDS.keys())
 
 # [4] Relaxed Financial Content Filter
 def is_financial(text):
-    """More inclusive financial content detection"""
     text_lower = text.lower()
-    financial_terms = sum(
-        1 for terms in MARKET_KEYWORDS.values() 
-        for term in terms if term in text_lower
-    )
-    non_financial = any(
-        term in text_lower 
-        for term in ["sports", "entertainment", "celebrity", "movie", "music"]
-    )
-    return financial_terms >= 2 and not non_financial
+    # accept if any single market has at least one matching term
+    for terms in MARKET_KEYWORDS.values():
+        if any(term in text_lower for term in terms):
+            # exclude obvious non-financial contexts
+            if not any(nx in text_lower for nx in ["sports", "entertainment", "celebrity", "movie", "music"]):
+                return True
+    return False
 
 # ----------------------------------------------------
 # --- GLOBAL MODEL INITIALIZATION ---
