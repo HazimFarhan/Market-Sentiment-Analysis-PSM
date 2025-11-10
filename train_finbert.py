@@ -1,6 +1,9 @@
 import pandas as pd
 import numpy as np
 import evaluate
+import transformers
+print(transformers.__version__)
+print(transformers.__file__)
 import re  # <-- NEW: Import regular expressions
 from datasets import Dataset
 from transformers import (
@@ -137,7 +140,7 @@ training_args = TrainingArguments(
     num_train_epochs=4,
     per_device_train_batch_size=4,
     gradient_accumulation_steps=8,  # Effective batch size = 4 * 8 = 32
-    evaluation_strategy="epoch",
+    eval_strategy="epoch",
     save_strategy="epoch",
     learning_rate=2e-5,
     weight_decay=0.01,

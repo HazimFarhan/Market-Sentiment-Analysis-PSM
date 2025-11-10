@@ -5,6 +5,7 @@ crypto_dataset.csv
 
 # Secret API Keys (VERY IMPORTANT!)
 .env
+venv/
 
 # Trained Model (also too big)
 finbert_finetuned/
