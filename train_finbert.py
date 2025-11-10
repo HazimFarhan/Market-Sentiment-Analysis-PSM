@@ -2,8 +2,14 @@ import pandas as pd
 import numpy as np
 import evaluate
 import transformers
-print(transformers.__version__)
-print(transformers.__file__)
+import torch
+print(torch.cuda.is_available())
+print(torch.cuda.current_device())
+print(torch.cuda.get_device_name(0))
+print("CUDA available:", torch.cuda.is_available())
+print("Device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="multiprocess")
 import re  # <-- NEW: Import regular expressions
 from datasets import Dataset
 from transformers import (
@@ -138,13 +144,13 @@ print("Configuring training arguments...")
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     num_train_epochs=4,
-    per_device_train_batch_size=4,
-    gradient_accumulation_steps=8,  # Effective batch size = 4 * 8 = 32
+    per_device_train_batch_size=8,
+    gradient_accumulation_steps=4,  # Effective batch size = 4 * 8 = 32
     eval_strategy="epoch",
     save_strategy="epoch",
     learning_rate=2e-5,
     weight_decay=0.01,
-    fp16=True,   # If it crashes (e.g., no NVIDIA GPU), set to False
+    fp16=False,   # If it crashes (e.g., no NVIDIA GPU), set to False GTX 1060 NOT SUPPPORTS FP16
     logging_dir="./logs",
     load_best_model_at_end=True,
     metric_for_best_model="f1",
