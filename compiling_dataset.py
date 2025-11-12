@@ -5,7 +5,7 @@ import sys
 
 # --- 1. CONFIGURE YOUR FILES ---
 BASE_FILE = "overall_dataset.csv"
-CRYPTO_FILE = "crypto_dataset.csv" # <-- Make sure this file name is correct
+CRYPTO_FILE = "crypto_sentiment_prediction_dataset.csv"
 OUTPUT_FILE = "combined_training_data.csv"
 
 # --- 2. CONFIGURE YOUR DATA ---
