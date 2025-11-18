@@ -3,6 +3,7 @@ combined_training_data.csv
 overall_dataset.csv
 crypto_dataset.csv
 crypto_sentiment_prediction_dataset.csv
+crypto_training_dataset
 
 # Secret API Keys (VERY IMPORTANT!)
 .env
