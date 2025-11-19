@@ -1,6 +1,10 @@
 from transformers import pipeline
 
-model = pipeline("text-classification", model="finbert_finetuned", tokenizer="finbert_finetuned")
+model = pipeline(
+    "text-classification",
+    model="finbert_crypto_finetuned_v2",
+    tokenizer="finbert_crypto_finetuned_v2"
+)
 
 tests = [
     "Bitcoin surges 12% after BlackRock ETF approval rumors.",

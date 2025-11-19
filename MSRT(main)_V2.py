@@ -14,7 +14,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Device in use: {device}")
 
 # Load fine-tuned FinBERT (trained by Hazim)
-FINBERT_MODEL = "./finbert_finetuned"  # Adjust if you saved in different folder
+FINBERT_MODEL = "./finbert_crypto_finetuned_v2"  # Adjust if you saved in different folder
 finbert_tokenizer = AutoTokenizer.from_pretrained(FINBERT_MODEL)
 finbert_model = AutoModelForSequenceClassification.from_pretrained(FINBERT_MODEL).to(device)
 finbert = pipeline("text-classification", model=finbert_model, tokenizer=finbert_tokenizer, device=0 if device == "cuda" else -1)
