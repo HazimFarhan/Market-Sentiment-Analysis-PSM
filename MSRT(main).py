@@ -1,374 +1,261 @@
-# msrt_main_v3.py
-# Combined NewsAPI + Google News RSS + Yahoo Finance fetcher integrated into MSRT
-# Replace your existing MSRT(main).py with this or copy the fetch_news() and date handling parts.
+# MSRT_main_with_targets.py
+# Enhanced MSRT: interactive target selection (Gold or Forex pair), combined NewsAPI+GoogleRSS+YahooRSS,
+# pick most recent article per day for last 5 days, then analyze & save.
 
 import os
 import requests
 import feedparser
-import yfinance as yf
 import pandas as pd
 import time
-from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
+from datetime import datetime, timedelta
+from dateutil import parser as dateparser
 from transformers import pipeline
+from dotenv import load_dotenv
 import torch
 
-# -------------------------
-# Configuration (edit as needed)
-# -------------------------
+# ------------ CONFIG -------------
 MARKET_KEYWORDS = {
-    "Stocks": ["stock", "equity", "share", "s&p", "nasdaq", "dow", "index", "bull", "bear", "market"],
-    "Forex": ["forex", "currency", "usd", "eur", "gbp", "jpy", "fx", "exchange rate", "dollar", "yen"],
-    "Commodities": ["oil", "gold", "silver", "commodity", "crude", "barrel", "ounce", "copper", "futures"],
-    "Economy": ["gdp", "inflation", "cpi", "unemployment", "economic", "growth", "recession", "fed", "ecb", "central bank"],
-    "Crypto": ["bitcoin", "crypto", "blockchain", "btc", "eth", "digital currency", "token", "defi"],
-    "Bonds": ["bond", "yield", "treasury", "debt", "10-year", "notes", "credit rating"]
+    "Forex": [
+        "forex", "currency", "usd", "eur", "gbp", "jpy", "fx", 
+        "exchange rate", "dollar", "yen", "pair", "forex market"
+    ],
+    "Gold": [
+        "gold price", "xauusd", "gold market", "spot gold",
+        "gold futures", "gold rises", "gold falls",
+        "safe haven", "precious metal"
+    ],
+    "Crypto": ["bitcoin", "crypto", "blockchain", "btc", "eth", "token"],
+    "Stocks": ["stock", "equity", "share", "s&p", "nasdaq", "dow"],
+    "Commodities": ["oil", "silver", "commodity", "crude", "barrel", "futures"],
+    "Economy": ["gdp", "inflation", "recession", "fed", "cpi", "central bank"],
+    "Bonds": ["bond", "yield", "treasury", "debt"]
 }
+
 AVAILABLE_MARKETS = list(MARKET_KEYWORDS.keys())
 
-# How many past days to fetch by default
-DEFAULT_DAYS_BACK = 5
-
-# NewsAPI endpoint template (supports from= and to=)
-NEWSAPI_ENDPOINT = "https://newsapi.org/v2/everything"
-
-# Google News RSS search template (we will search for broad queries)
-GOOGLE_RSS_TEMPLATE = "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-
-# Optional: list of tickers to query via yfinance for market-specific news (keeps Yahoo footprint small)
-YFINANCE_TICKERS = ["^GSPC", "GC=F", "CL=F", "BTC-USD", "AAPL", "MSFT", "NVDA"]  # adjust as needed
-
-# -------------------------
-# Helper functions
-# -------------------------
-def is_financial(text: str) -> bool:
-    text_lower = (text or "").lower()
+# ------------ HELPERS -------------
+def is_financial(text):
+    text_lower = text.lower()
     # accept if any single market has at least one matching term
     for terms in MARKET_KEYWORDS.values():
         if any(term in text_lower for term in terms):
-            # exclude obvious non-financial contexts
             if not any(nx in text_lower for nx in ["sports", "entertainment", "celebrity", "movie", "music"]):
                 return True
     return False
 
-def parse_rss_date(dt_str):
-    """Try a few common RSS date formats, return timezone-aware datetime or None."""
-    if not dt_str:
-        return None
-    # feedparser gives published_parsed as struct_time, but sometimes we get string
+# ------------ MODEL LOADING -------------
+try:
+    print("MSRT: Loading AI models (attempt GPU: device=0)...")
+    finbert = pipeline("text-classification", model="yiyanghkust/finbert-tone", device=0)
+    emotion = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", device=0)
+    print("MSRT: AI Models loaded successfully.")
+except Exception as e:
+    print(f"⚠️ GPU unavailable or load error: {e} — falling back to CPU.")
+    finbert = pipeline("text-classification", model="yiyanghkust/finbert-tone", device=-1)
+    emotion = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", device=-1)
+
+# ------------ SIGNAL GENERATOR (your existing logic) -------------
+def get_signal(text):
     try:
-        # feedparser
-        import email.utils
-        parsed = email.utils.parsedate_to_datetime(dt_str)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-    except Exception:
-        pass
-    # fallback
-    for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
-        try:
-            dt = datetime.strptime(dt_str, fmt)
-            return dt.replace(tzinfo=timezone.utc)
-        except Exception:
-            pass
-    return None
-
-# -------------------------
-# Combined news fetcher
-# -------------------------
-def fetch_news_combined(newsapi_key: str, days_back: int = DEFAULT_DAYS_BACK, query_terms: str = None, max_results: int = 500):
-    """
-    Fetch news from three sources:
-     - NewsAPI (requires API key)
-     - Google News RSS (search-based)
-     - Yahoo Finance via yfinance (if available)
-    Returns a deduplicated list of dicts: {"text": ..., "date": "YYYY-MM-DD", "source": ...}
-    """
-    now = datetime.now(timezone.utc)
-    cutoff_date = now - timedelta(days=int(days_back))  # ensures int delta
-    results = []
-    seen = set()
-
-    # --- 1) NewsAPI (everything endpoint with from/to) ---
-    if newsapi_key:
-        try:
-            print("MSRT: Fetching NewsAPI articles...")
-            # construct params - 'q' optional (query_terms); limit page size and paginate if needed
-            params = {
-                "pageSize": 100,
-                "language": "en",
-                "sortBy": "publishedAt",
-            }
-            if query_terms:
-                params["q"] = query_terms
-            # from (ISO format)
-            params["from"] = cutoff_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-            params["to"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-            params["apiKey"] = newsapi_key
-
-            page = 1
-            fetched = 0
-            while True:
-                params["page"] = page
-                resp = requests.get(NEWSAPI_ENDPOINT, params=params, timeout=15)
-                data = resp.json()
-                articles = data.get("articles", [])
-                if not articles:
-                    break
-                for a in articles:
-                    title = (a.get("title") or "").strip()
-                    desc = (a.get("description") or "").strip()
-                    text = f"{title}. {desc}".strip()
-                    pub = a.get("publishedAt")
-                    try:
-                        pub_dt = datetime.fromisoformat(pub.replace("Z", "+00:00")).astimezone(timezone.utc) if pub else None
-                    except Exception:
-                        pub_dt = None
-                    if pub_dt is None:
-                        pub_dt = now
-                    if pub_dt < cutoff_date:
-                        continue
-                    key = (text[:400])
-                    if text and key not in seen and is_financial(text):
-                        seen.add(key)
-                        results.append({"text": text[:1000], "date": pub_dt.date().isoformat(), "source": "NewsAPI"})
-                        fetched += 1
-                        if fetched >= max_results:
-                            break
-                if fetched >= max_results:
-                    break
-                page += 1
-        except Exception as e:
-            print("⚠️ MSRT: NewsAPI error:", e)
-
-    # --- 2) Google News RSS ---
-    try:
-        print("MSRT: Fetching Google News RSS...")
-        # broad query: if user provided query_terms use it; otherwise search for financial keywords joined by OR
-        if not query_terms:
-            # create a joined query of important keywords (space joins use OR for Google News)
-            joined = " OR ".join([kw for terms in MARKET_KEYWORDS.values() for kw in terms[:3]])  # take a few keywords
-            query = joined
-        else:
-            query = query_terms
-
-        rss_url = GOOGLE_RSS_TEMPLATE.format(query=requests.utils.quote(query))
-        feed = feedparser.parse(rss_url)
-        for entry in feed.entries:
-            title = entry.get("title", "").strip()
-            summary = entry.get("summary", "").strip()
-            text = f"{title}. {summary}".strip()
-            pub_dt = None
-            # feedparser exposes published or published_parsed
-            if 'published' in entry:
-                pub_dt = parse_rss_date(entry.get("published"))
-            elif 'updated' in entry:
-                pub_dt = parse_rss_date(entry.get("updated"))
-            if pub_dt is None:
-                pub_dt = now
-            if pub_dt < cutoff_date:
-                continue
-            key = text[:400]
-            if text and key not in seen and is_financial(text):
-                seen.add(key)
-                results.append({"text": text[:1000], "date": pub_dt.date().isoformat(), "source": "GoogleRSS"})
-    except Exception as e:
-        print("⚠️ MSRT: Google RSS error:", e)
-
-    # --- 3) Yahoo Finance via yfinance (ticker news) ---
-    try:
-        print("MSRT: Fetching Yahoo Finance news via yfinance tickers...")
-        for ticker in YFINANCE_TICKERS:
-            try:
-                t = yf.Ticker(ticker)
-                news_items = t.news  # list of dicts: title, publisher, link, providerPublishTime
-                for n in news_items:
-                    title = n.get("title", "")
-                    summary = n.get("summary") or ""
-                    text = f"{title}. {summary}".strip()
-                    pub_ts = n.get("providerPublishTime")
-                    pub_dt = datetime.fromtimestamp(pub_ts, tz=timezone.utc) if pub_ts else now
-                    if pub_dt < cutoff_date:
-                        continue
-                    key = text[:400]
-                    if text and key not in seen and is_financial(text):
-                        seen.add(key)
-                        results.append({"text": text[:1000], "date": pub_dt.date().isoformat(), "source": f"Yahoo:{ticker}"})
-            except Exception as inner:
-                # don't fail whole fetch on single ticker
-                print(f"  - Warning: yahoo ticker {ticker} fetch error: {inner}")
-    except Exception as e:
-        print("⚠️ MSRT: yfinance error (skipping Yahoo news):", e)
-
-    # --- Final dedup & sort by date desc ---
-    try:
-        df = pd.DataFrame(results)
-        if df.empty:
-            return []
-        # keep unique by text
-        df = df.drop_duplicates(subset=["text"])
-        df = df.sort_values("date", ascending=False)
-        # Limit to max_results if too many
-        if len(df) > max_results:
-            df = df.head(max_results)
-        return df.to_dict("records")
-    except Exception as e:
-        print("⚠️ MSRT: Final aggregation error:", e)
-        return results
-
-# -------------------------
-# Model loading & signal (use your existing pipelines)
-# -------------------------
-def load_models(finbert_path=None):
-    try:
-        device = 0 if torch.cuda.is_available() else -1
-        if finbert_path:
-            print("MSRT: Loading fine-tuned FinBERT from", finbert_path)
-            finbert = pipeline("text-classification", model=finbert_path, device=device)
-        else:
-            print("MSRT: Loading upstream FinBERT")
-            finbert = pipeline("text-classification", model="yiyanghkust/finbert-tone", device=device)
-
-        emotion = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", device=device)
-        return finbert, emotion
-    except Exception as e:
-        print("⚠️ MSRT: Model loading error:", e)
-        raise
-
-# Example refined get_signal (same as we previously agreed)
-def get_signal(text, finbert_pipeline, emotion_pipeline):
-    try:
-        finbert_result = finbert_pipeline(text[:512], return_all_scores=True)[0]
-        finbert_sorted = sorted(finbert_result, key=lambda x: x['score'], reverse=True)
-        sentiment_label = finbert_sorted[0]['label']
-        sentiment_conf = finbert_sorted[0]['score']
-
-        emotion_result = emotion_pipeline(text[:512], return_all_scores=True)[0]
-        emotion_sorted = sorted(emotion_result, key=lambda x: x['score'], reverse=True)
-        emotion_label = emotion_sorted[0]['label']
-        emotion_conf = emotion_sorted[0]['score']
-
+        sentiment = finbert(text[:512])[0]['label']
+        emotion_label = emotion(text[:512])[0]['label']
         market = next((mkt for mkt, terms in MARKET_KEYWORDS.items()
                        if any(term in text.lower() for term in terms)), "General")
-
-        sentiment_score = {"Positive": 1.0, "Neutral": 0.0, "Negative": -1.0}.get(sentiment_label, 0.0)
-        emotion_weight = {
-            "joy": 0.4, "optimism": 0.3, "excitement": 0.2,
-            "fear": -0.4, "anger": -0.3, "annoyance": -0.1
-        }.get(emotion_label.lower(), 0)
-
-        score = (sentiment_score * (0.7 + 0.3 * sentiment_conf)) + (emotion_weight * emotion_conf)
+        score = {"Positive": 1.0, "Neutral": 0.0, "Negative": -1.0}[sentiment]
+        score += {"joy": 0.3, "optimism": 0.2, "excitement": 0.1,
+                  "fear": -0.3, "anger": -0.2, "annoyance": -0.1}.get(emotion_label.lower(), 0)
         score *= {"Stocks": 1.2, "Crypto": 1.3, "Commodities": 1.1}.get(market, 1.0)
-
-        if -0.4 < score < 0.4:
-            final_signal = "⚪ Neutral"
-        elif score >= 1.5:
-            final_signal = "🟢 Strong Buy"
-        elif score >= 0.7:
-            final_signal = "🟢 Buy"
-        elif score <= -1.5:
-            final_signal = "🔴 Strong Sell"
-        elif score <= -0.7:
-            final_signal = "🟠 Sell"
-        else:
-            final_signal = "⚪ Neutral"
-
-        return {
-            "Signal": final_signal,
-            "FinBERT_Label": sentiment_label,
-            "FinBERT_Confidence": round(sentiment_conf, 3),
-            "Emotion_Label": emotion_label,
-            "Emotion_Confidence": round(emotion_conf, 3),
-            "Score": round(score, 3),
-        }
+        if score >= 1.5: return "🟢 Strong Buy"
+        elif score >= 0.7: return "🟢 Buy"
+        elif score <= -1.5: return "🔴 Strong Sell"
+        elif score <= -0.7: return "🟠 Sell"
+        return "⚪ Neutral"
     except Exception as e:
-        print("⚠️ MSRT: get_signal error:", e)
-        return {
-            "Signal": "⚪ Neutral",
-            "FinBERT_Label": "Error",
-            "FinBERT_Confidence": 0.0,
-            "Emotion_Label": "Error",
-            "Emotion_Confidence": 0.0,
-            "Score": 0.0
-        }
+        print(f"⚠️ MSRT: Analysis error: {e}")
+        return "⚪ Neutral"
 
-# -------------------------
-# Main analysis wrapper (keeps your interactive flow)
-# -------------------------
-def analyze_selected_market(target_market, finbert, emotion, newsapi_key=None, days_back=DEFAULT_DAYS_BACK):
-    current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n[{current_time}] MSRT: Fetching news for last {days_back} days from combined sources...")
-    # optional query tailored to the market to focus RSS/NewsAPI searches
-    market_query = " OR ".join(MARKET_KEYWORDS.get(target_market, []))
-    news_items = fetch_news_combined(newsapi_key, days_back=days_back, query_terms=market_query, max_results=500)
+# ------------ NEWS SOURCES (combined) -------------
 
-    if not news_items:
-        print("⚠️ MSRT: No news items found.")
+def fetch_news_newsapi(api_key, q, page_size=50):
+    items = []
+    try:
+        url = "https://newsapi.org/v2/everything"
+        params = {"q": q, "language": "en", "pageSize": page_size, "apiKey": api_key, "sortBy": "publishedAt"}
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        j = r.json()
+        for a in j.get("articles", []):
+            title = a.get("title", "") or ""
+            desc = a.get("description", "") or ""
+            text = f"{title}. {desc}".strip()
+            published = a.get("publishedAt", None)
+            if published:
+                try:
+                    dt = dateparser.parse(published)
+                except:
+                    dt = None
+            else:
+                dt = None
+            items.append({"text": text, "date": dt})
+    except Exception as e:
+        print(f"NewsAPI fetch error: {e}")
+    return items
+
+def fetch_news_google_rss(q, max_items=100):
+    items = []
+    try:
+        # google news RSS search
+        rss_url = f"https://news.google.com/rss/search?q={requests.utils.quote(q)}&hl=en-US&gl=US&ceid=US:en"
+        feed = feedparser.parse(rss_url)
+        for e in feed.entries[:max_items]:
+            title = e.get("title", "")
+            desc = e.get("summary", "")
+            text = f"{title}. {desc}".strip()
+            # Google provides published time in 'published' or 'updated'
+            published = e.get("published", e.get("updated", None))
+            dt = None
+            if published:
+                try:
+                    dt = dateparser.parse(published)
+                except:
+                    dt = None
+            items.append({"text": text, "date": dt})
+    except Exception as e:
+        print(f"Google RSS fetch error: {e}")
+    return items
+
+def fetch_news_yahoo_rss(q, max_items=100):
+    items = []
+    try:
+        # Yahoo finance RSS: use the search-style feed for query
+        # e.g. https://news.yahoo.com/rss/search?p=gold
+        rss_url = f"https://news.yahoo.com/rss/search?p={requests.utils.quote(q)}"
+        feed = feedparser.parse(rss_url)
+        for e in feed.entries[:max_items]:
+            title = e.get("title", "")
+            desc = e.get("summary", "")
+            text = f"{title}. {desc}".strip()
+            published = e.get("published", e.get("updated", None))
+            dt = None
+            if published:
+                try:
+                    dt = dateparser.parse(published)
+                except:
+                    dt = None
+            items.append({"text": text, "date": dt})
+    except Exception as e:
+        print(f"Yahoo RSS fetch error: {e}")
+    return items
+
+def fetch_combined_news(newsapi_key, query, limit_days=5):
+    """
+    Fetch from NewsAPI + Google RSS + Yahoo RSS for the given query.
+    Then keep at most one (most recent) article per day, for up to 'limit_days' distinct days.
+    Returns list of dicts with 'text' and 'date' (datetime).
+    """
+    print(f"MSRT: Fetching combined news for query: {query}")
+    combined = []
+    if newsapi_key:
+        combined += fetch_news_newsapi(newsapi_key, query, page_size=50)
+    combined += fetch_news_google_rss(query, max_items=80)
+    combined += fetch_news_yahoo_rss(query, max_items=80)
+
+    # keep items with dates; if some have no date, set to now (so they'll be recent)
+    for it in combined:
+        if it["date"] is None:
+            it["date"] = datetime.utcnow()
+
+    # Normalize: produce date-only key (YYYY-MM-DD), sort by datetime desc
+    combined_sorted = sorted(combined, key=lambda x: x["date"], reverse=True)
+
+    # pick most recent article per day up to limit_days
+    selected = []
+    seen_days = set()
+    for it in combined_sorted:
+        day = it["date"].strftime("%Y-%m-%d")
+        if day not in seen_days:
+            selected.append(it)
+            seen_days.add(day)
+        if len(seen_days) >= limit_days:
+            break
+
+    # If fewer than limit_days available, we still return what we have
+    print(f"MSRT: Collected {len(selected)} daily articles (most recent per day, up to {limit_days}).")
+    return selected
+
+# ------------ ANALYSIS & CSV LOGGING -------------
+def analyze_and_save(target_query, target_market_label, newsapi_key, out_prefix="msrt"):
+    items = fetch_combined_news(newsapi_key, target_query, limit_days=5)
+    if not items:
+        print("MSRT: No news items found for query.")
         return
 
-    keywords = MARKET_KEYWORDS.get(target_market, [])
-    filtered = [it for it in news_items if any(kw in it["text"].lower() for kw in keywords)]
-    print(f"MSRT: Found {len(filtered)} candidate articles after keyword filtering.")
-
     results = []
-    for item in filtered:
-        sig = get_signal(item["text"], finbert, emotion)
+    run_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for it in items:
+        txt = it["text"][:1000]
+        signal = get_signal(txt)
         results.append({
-            "Market": target_market,
-            "Headline": item["text"][:200],
-            "Signal": sig["Signal"],
-            "Sentiment": sig["FinBERT_Label"],
-            "Sent_Conf": sig["FinBERT_Confidence"],
-            "Emotion": sig["Emotion_Label"],
-            "Emo_Conf": sig["Emotion_Confidence"],
-            "Score": sig["Score"],
-            "Date": item["date"],
-            "Source": item.get("source"),
-            "Run_Time": current_time
+            "Market": target_market_label,
+            "Headline": txt[:200] + ("..." if len(txt) > 200 else ""),
+            "Signal": signal,
+            "Date": it["date"].strftime("%Y-%m-%d"),
+            "Run_Time": run_time
         })
 
-    if results:
-        df = pd.DataFrame(results)
-        log_file = f"msrt_{target_market.lower()}_signals.csv"
-        write_header = not os.path.exists(log_file)
-        df.to_csv(log_file, index=False, mode='a', header=write_header, encoding='utf-8')
-        print(f"✅ MSRT: Saved {len(df)} signals to {log_file}")
-        print(df.tail())
-    else:
-        print("⚠️ MSRT: No signals generated.")
+    df = pd.DataFrame(results)
+    # filename like msrt_gold_signals.csv or msrt_forex_eurusd_signals.csv
+    safe_label = target_market_label.lower().replace(" ", "_")
+    filename = f"{out_prefix}_{safe_label}_signals.csv"
+    write_header = not os.path.exists(filename)
+    df.to_csv(filename, mode='a', index=False, header=write_header, encoding='utf-8')
+    print(f"✅ MSRT: Results saved to {filename}")
+    print(df)
 
-# -------------------------
-# Interactive entry point
-# -------------------------
+# ------------ INTERACTIVE FLOW -------------
 if __name__ == "__main__":
     load_dotenv()
-    NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
-    FINBERT_PATH = os.getenv("FINBERT_MODEL_DIR", None)  # optionally point to your fine-tuned model folder
-
-    finbert, emotion = load_models(FINBERT_PATH)
+    NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")  # optional, works without but better with
+    print("MSRT Interactive - Targeted news for MT5 charting.")
+    print("Pick a target to display on chart (keyword-based). Options: [gold] or [forex].\n")
 
     while True:
-        print("\n" + "="*60)
-        print("MSRT Interactive Market Sentiment Analysis")
-        print("Available Markets:", ", ".join(AVAILABLE_MARKETS))
-        print("Type 'exit' to quit.")
-        print("="*60)
-
-        user_input = input("Enter market to analyze (e.g., Stocks, Crypto): ").strip()
-        if user_input.lower() == "exit":
-            print("MSRT: Goodbye.")
+        choice = input("Target (gold / forex), or 'exit' to quit: ").strip().lower()
+        if choice == "exit":
+            print("Bye.")
             break
-        target = user_input.title()
-        if target not in AVAILABLE_MARKETS:
-            print("⚠️ Invalid market. Try again.")
+        if choice not in ("gold", "forex"):
+            print("Invalid. Enter 'gold' or 'forex'.")
             continue
 
-        # Ask how many days back to fetch (press Enter for default)
-        days_str = input(f"How many days back to fetch? (default {DEFAULT_DAYS_BACK}): ").strip()
-        try:
-            days = int(days_str) if days_str else DEFAULT_DAYS_BACK
-        except Exception:
-            days = DEFAULT_DAYS_BACK
+        if choice == "gold":
+            # Accept synonyms
+            user_symbol = input("Enter gold keyword (e.g. 'gold' or 'xauusd') (press Enter for 'gold'): ").strip()
+            if user_symbol == "":
+                user_symbol = "gold"
+            # build query - keep it simple & keyword-rich
+            query = f"{user_symbol} OR gold OR xauusd OR XAU"
+            analyze_and_save(query, "Gold", NEWSAPI_KEY)
 
-        analyze_selected_market(target, finbert, emotion, newsapi_key=NEWSAPI_KEY, days_back=days)
+        else:  # forex
+            pair = input("Enter forex pair (e.g. EURUSD, USDJPY, GBPUSD): ").strip().upper()
+            if pair == "":
+                print("No pair entered. Try again.")
+                continue
+            # Create friendly, keyword-rich queries: ticker, symbols, currency names
+            pair_clean = pair.replace("/", "").replace("-", "")
+            # Expand symbols to names for better search coverage
+            pair_map_names = {
+                "EURUSD": "EUR USD euro dollar",
+                "USDJPY": "USD JPY dollar yen",
+                "GBPUSD": "GBP USD pound dollar",
+                "AUDUSD": "AUD USD aussie dollar",
+                "USDCAD": "USD CAD dollar canadian",
+                "USDCHF": "USD CHF dollar swiss"
+            }
+            name_terms = pair_map_names.get(pair_clean, pair_clean)
+            query = f"{pair_clean} OR {name_terms}"
+            analyze_and_save(query, f"Forex_{pair_clean}", NEWSAPI_KEY)
+
+        # short sleep to avoid spamming services
+        time.sleep(1)
